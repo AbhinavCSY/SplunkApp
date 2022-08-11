@@ -17,3 +17,7 @@
  7. Now restart the Splunk server, Go to Setting -- System -- Server Control -- Restart, Wait for the server to restart and you can see the Splunk App on your Deployment.
 ### 👩‍💻  Developer documentation - WIP
 
+**Landing Dashboard**
+![enter image description here](https://raw.githubusercontent.com/AbhinavCSY/SplunkApp/main/Dashboards/Frame%20%285%29.png)
+**Kubearmor Dashboard**
+![enter image description here](https://raw.githubusercontent.com/AbhinavCSY/SplunkApp/main/Dashboards/Frame%20%286%29.png)
