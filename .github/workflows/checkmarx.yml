@@ -1,0 +1,110 @@
+name: Checkmarx Sarif Integration
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  schedule:
+    - cron: '18 2 * * 5'
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Checkmarx scan
+        uses: checkmarx/ast-github-action@main
+        with:
+          base_uri: https://deu.iam.checkmarx.net/
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          cx_tenant: ${{ secrets.CX_TENANT }} # Replace with your tenant name
+          additional_params: --report-format sarif --output-path .
+
+      - name: Extract and append code snippets to SARIF file
+        run: |
+          # Create a temporary SARIF file to collect results with snippets
+          echo '{"runs":[{"results":[]}]}' > results_with_snippets.sarif
+
+          # Loop over all results in the SARIF file
+          jq -c '.runs[0].results[]' cx_result.sarif | while IFS= read -r result; do
+            # Extract file path and line numbers from SARIF
+            file=$(echo "$result" | jq -r '.locations[0].physicalLocation.artifactLocation.uri')
+            startLine=$(echo "$result" | jq -r '.locations[0].physicalLocation.region.startLine')
+            endLine=$(echo "$result" | jq -r '.locations[0].physicalLocation.region.endLine')
+
+            # Check if file exists and extract code snippet
+            if [ -f "$file" ]; then
+              snippet=$(awk "NR>=$startLine && NR<=$endLine" "$file" | jq -Rs .)
+            else
+              snippet='{"text": "File not found or invalid path"}'
+            fi
+
+            # Append the code snippet to the result
+            updated_result=$(echo "$result" | jq --arg snippet "$snippet" '.locations[0].physicalLocation.region.snippet = {"text": $snippet}')
+
+            # Append the updated result to the new SARIF file
+            echo "$updated_result" | jq -c '.' >> results_with_snippets.sarif
+          done
+
+          # Finalize the SARIF file structure
+          jq '.runs[0].results = (input | .runs[0].results)' cx_result.sarif < results_with_snippets.sarif > cx_result_with_snippets.sarif
+          mv cx_result_with_snippets.sarif cx_result.sarif
+
+      - name: Fix SARIF file levels
+        run: |
+          jq 'walk(if type == "object" and has("level") then .level |= (if . == "none" or . == "note" or . == "warning" or . == "error" then . else "note" end) else . end)' cx_result.sarif > tmp.sarif && mv tmp.sarif cx_result.sarif
+
+      - name: Append GitHub metadata to SARIF
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          SOURCE: "GitHub"
+        run: |
+          GITHUB_URL="${{ github.server_url }}/${{ github.repository }}"
+          GITHUB_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          jq --arg repo "$GITHUB_REPOSITORY" \
+             --arg sha "$GITHUB_SHA" \
+             --arg ref "$GITHUB_REF" \
+             --arg run_id "$GITHUB_RUN_ID" \
+             --arg run_number "$GITHUB_RUN_NUMBER" \
+             --arg github_url "$GITHUB_URL" \
+             --arg github_run_url "$GITHUB_RUN_URL" \
+             --arg source "$SOURCE" \
+             '.runs[0].invocations += [{
+                "executionSuccessful": true,
+                "toolExecutionNotifications": [],
+                "toolConfigurationNotifications": [],
+                "properties": {
+                  "repository": $repo,
+                  "commit": $sha,
+                  "ref": $ref,
+                  "workflow_run_id": $run_id,
+                  "workflow_run_number": $run_number,
+                  "repository_url": $github_url,
+                  "workflow_run_url": $github_run_url,
+                  "source": $source
+                }
+              }]' cx_result.sarif > tmp.sarif && mv tmp.sarif cx_result.sarif
+
+      - name: Upload SARIF file to GitHub
+        uses: actions/upload-artifact@v3
+        with:
+          name: sarif-result
+          path: cx_result.sarif
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: cx_result.sarif
